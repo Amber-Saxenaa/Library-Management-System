@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library Manager</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+:root{--bg:#f5f3ee;--surface:#fff;--ink:#1f2a37;--muted:#667085;--line:#e1ddd2;--amber:#b7791f;--amber-d:#8f5d14;--red:#b42318;--green:#2f6f4f}
+@media (prefers-color-scheme:dark){:root{--bg:#161b22;--surface:#1f262f;--ink:#e8e6e1;--muted:#98a2b3;--line:#323b47;--amber:#e0a43a;--amber-d:#f0b955;--red:#f97066;--green:#6fcf9b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Public Sans",system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:20px 24px;border-bottom:3px solid var(--amber)}
+h1{font:600 26px "Fraunces",Georgia,serif;margin:0}
+main{padding:20px 24px;max-width:1100px;margin:0 auto}
+button{font:inherit;cursor:pointer;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:6px 12px}
+button:hover{border-color:var(--amber)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.primary{background:var(--amber);border-color:var(--amber);color:#fff;font-weight:600}
+.primary:hover{background:var(--amber-d)}
+.danger{color:var(--red)}
+nav{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px}
+nav button{border-radius:6px 6px 0 0;border-bottom:none}
+nav button[aria-selected=true]{background:var(--amber);color:#fff;border-color:var(--amber)}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+.hint{color:var(--muted);font-size:13px}
+.wrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-weight:600;color:var(--muted);font-size:13px}
+tr:last-child td{border-bottom:none}
+td.act{display:flex;gap:6px}
+.empty{padding:28px;text-align:center;color:var(--muted)}
+dialog{border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);padding:22px;width:min(420px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+label{display:block;font-weight:500;margin:10px 0 3px}
+input{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+.err{color:var(--red);min-height:20px;margin:10px 0 0;font-size:14px}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--green);color:#fff;padding:8px 16px;border-radius:6px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>Library Manager</h1>
+  <div>
+    <span id="state" class="hint"></span>
+    <button id="lockBtn" class="primary"></button>
+  </div>
+</header>
+<main>
+  <nav id="tabs" role="tablist"></nav>
+  <div class="bar">
+    <span class="hint" id="meta"></span>
+    <button id="addBtn" class="primary" hidden>Add row</button>
+  </div>
+  <div class="wrap"><table id="grid"></table></div>
+</main>
+
+<dialog id="loginDlg">
+  <form method="dialog" id="loginForm">
+    <h2 style="margin:0 0 4px">Unlock editing</h2>
+    <p class="hint" style="margin:0">Enter the password to add, edit or delete rows.</p>
+    <label for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="off">
+    <p class="err" id="loginErr"></p>
+    <div class="row"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Unlock</button></div>
+  </form>
+</dialog>
+
+<dialog id="formDlg">
+  <form method="dialog" id="rowForm">
+    <h2 id="formTitle" style="margin:0 0 4px"></h2>
+    <div id="fields"></div>
+    <p class="err" id="formErr"></p>
+    <div class="row"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Save</button></div>
+  </form>
+</dialog>
+<div id="toast"></div>
+
+<script>
+// Column definitions: [name, input type, required?]
+const SCHEMA = {
+  authors: {pk:"author_id", cols:[["name","text",1],["country","text"]]},
+  books:   {pk:"book_id", cols:[["title","text",1],["author_id","number"],["genre","text"],["isbn","text"],["total_copies","number"],["year_published","number"]]},
+  members: {pk:"member_id", cols:[["name","text",1],["email","email",1],["phone","text"],["join_date","date"]]},
+  loans:   {pk:"loan_id", cols:[["book_id","number",1],["member_id","number",1],["loan_date","date"],["due_date","date",1],["return_date","date"]]}
+};
+const $ = id => document.getElementById(id);
+let table = "books", rows = [], unlocked = false, editingId = null;
+
+async function api(path, method="GET", body){
+  const r = await fetch("/api/"+path, {method, headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
+  const data = await r.json().catch(()=>({}));
+  if(!r.ok){ if(r.status===401 && path!=="login") setLock(false); throw new Error(data.error || "Request failed"); }
+  return data;
+}
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1800); }
+function setLock(v){
+  unlocked = v;
+  $("lockBtn").textContent = v ? "Lock" : "Unlock to edit";
+  $("state").textContent = v ? "Editing enabled " : "View only ";
+  $("addBtn").hidden = !v;
+  render();
+}
+
+function buildTabs(){
+  $("tabs").innerHTML = "";
+  Object.keys(SCHEMA).forEach(t=>{
+    const b = document.createElement("button");
+    b.textContent = t[0].toUpperCase()+t.slice(1);
+    b.setAttribute("role","tab");
+    b.setAttribute("aria-selected", t===table);
+    b.onclick = ()=>{ table=t; buildTabs(); load(); };
+    $("tabs").appendChild(b);
+  });
+}
+
+async function load(){
+  try{ rows = await api(table); render(); $("meta").textContent = rows.length+" rows · live from PostgreSQL"; }
+  catch(e){ $("meta").textContent = "Cannot reach database: "+e.message; }
+}
+
+function render(){
+  const s = SCHEMA[table], cols = [s.pk, ...s.cols.map(c=>c[0])];
+  const g = $("grid");
+  if(!rows.length){ g.innerHTML = '<tr><td class="empty">No rows yet. '+(unlocked?'Use "Add row" to create one.':'Unlock to add one.')+'</td></tr>'; return; }
+  const esc = v => String(v ?? "").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  let h = "<thead><tr>"+cols.map(c=>"<th>"+c.replace(/_/g," ")+"</th>").join("")+(unlocked?"<th></th>":"")+"</tr></thead><tbody>";
+  rows.forEach(r=>{
+    h += "<tr>"+cols.map(c=>"<td>"+(r[c]==null?'<span class="hint">null</span>':esc(r[c]))+"</td>").join("");
+    if(unlocked) h += '<td class="act"><button data-edit="'+r[s.pk]+'">Edit</button><button class="danger" data-del="'+r[s.pk]+'">Delete</button></td>';
+    h += "</tr>";
+  });
+  g.innerHTML = h+"</tbody>";
+}
+
+function openForm(row){
+  editingId = row ? row[SCHEMA[table].pk] : null;
+  $("formTitle").textContent = (row ? "Edit " : "Add ") + table.slice(0,-1);
+  $("formErr").textContent = "";
+  $("fields").innerHTML = SCHEMA[table].cols.map(([n,type,req])=>
+    '<label for="f_'+n+'">'+n.replace(/_/g," ")+(req?" *":"")+'</label><input id="f_'+n+'" type="'+type+'" '+(req&&row?"required ":"")+'value="'+(row&&row[n]!=null?String(row[n]).replace(/"/g,"&quot;"):"")+'">'
+  ).join("");
+  $("formDlg").showModal();
+}
+
+$("grid").addEventListener("click", async e=>{
+  const ed = e.target.dataset.edit, del = e.target.dataset.del, pk = SCHEMA[table].pk;
+  if(ed) openForm(rows.find(r=>String(r[pk])===ed));
+  if(del && confirm("Delete this row from the database? This cannot be undone.")){
+    try{ await api(table+"/"+del,"DELETE"); toast("Deleted"); load(); }
+    catch(err){ alert(err.message); }
+  }
+});
+$("addBtn").onclick = ()=>openForm(null);
+
+$("rowForm").addEventListener("submit", async e=>{
+  e.preventDefault();
+  const body = {}; SCHEMA[table].cols.forEach(([n])=>body[n]=$("f_"+n).value);
+  try{
+    await api(editingId ? table+"/"+editingId : table, editingId ? "PUT" : "POST", body);
+    $("formDlg").close(); toast(editingId ? "Updated" : "Created"); load();
+  }catch(err){ $("formErr").textContent = err.message; }
+});
+
+$("lockBtn").onclick = async ()=>{
+  if(unlocked){ await api("logout","POST"); setLock(false); return; }
+  $("pw").value=""; $("loginErr").textContent=""; $("loginDlg").showModal(); $("pw").focus();
+};
+$("loginForm").addEventListener("submit", async e=>{
+  e.preventDefault();
+  try{ await api("login","POST",{password:$("pw").value}); $("loginDlg").close(); setLock(true); toast("Editing enabled"); }
+  catch(err){ $("loginErr").textContent = err.message; }
+});
+document.querySelectorAll("[data-close]").forEach(b=>b.onclick=()=>b.closest("dialog").close());
+
+// Keep the page in sync with changes made directly in SQL: refresh every 5 s,
+// except while a form is open so typing is never interrupted.
+setInterval(()=>{ if(!$("formDlg").open && !$("loginDlg").open) load(); }, 5000);
+
+buildTabs(); load(); api("status").then(s=>setLock(s.unlocked)).catch(()=>setLock(false));
+</script>
+</body>
+</html>
